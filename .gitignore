@@ -1,0 +1,7 @@
+*.dip
+*.dipxml
+*.asc
+*.dxf
+*.bak
+*.log
+!tests/fixtures/*.dipxml
