@@ -6,7 +6,7 @@ $base = Split-Path -Parent $MyInvocation.MyCommand.Path
 $merge = Join-Path $base 'Merge-DipTracePours.ps1'
 $form=New-Object Windows.Forms.Form
 $form.Text='DipTrace Copper Pour Importer'
-$form.Size=New-Object Drawing.Size(790,650)
+$form.Size=New-Object Drawing.Size(790,800)
 $form.StartPosition='CenterScreen'
 $form.MinimumSize=New-Object Drawing.Size(790,650)
 $form.Font=New-Object Drawing.Font('Segoe UI',9)
@@ -35,7 +35,10 @@ $layerLabel=New-Object Windows.Forms.Label;$layerLabel.Text='Layer ID for source
 $layer=New-Object Windows.Forms.NumericUpDown;$layer.Location=New-Object Drawing.Point(190,363);$layer.Maximum=100;$layer.Width=75;$form.Controls.Add($layer)
 $note=New-Object Windows.Forms.Label;$note.Text='Source shapes: only closed Polygon and FillRect shapes are converted. New pours are unassigned (NetId=-1) and unpoured; confirm layer, net and fill rules inside DipTrace.';$note.Location=New-Object Drawing.Point(18,401);$note.Size=New-Object Drawing.Size(735,43);$form.Controls.Add($note)
 $run=New-Object Windows.Forms.Button;$run.Text='Merge copper pours';$run.Location=New-Object Drawing.Point(18,458);$run.Size=New-Object Drawing.Size(180,36);$run.BackColor=[Drawing.Color]::FromArgb(35,106,177);$run.ForeColor=[Drawing.Color]::White;$form.Controls.Add($run)
-$log=New-Object Windows.Forms.TextBox;$log.Multiline=$true;$log.ReadOnly=$true;$log.ScrollBars='Vertical';$log.Location=New-Object Drawing.Point(18,507);$log.Size=New-Object Drawing.Size(737,92);$log.Anchor='Top,Left,Right,Bottom';$form.Controls.Add($log)
+$preview=New-Object Windows.Forms.CheckBox;$preview.Text='Analyze only (no PCB output)';$preview.Location=New-Object Drawing.Point(215,460);$preview.AutoSize=$true;$form.Controls.Add($preview)
+$verboseBox=New-Object Windows.Forms.CheckBox;$verboseBox.Text='Verbose logging';$verboseBox.Location=New-Object Drawing.Point(480,460);$verboseBox.AutoSize=$true;$form.Controls.Add($verboseBox)
+$progress=New-Object Windows.Forms.ProgressBar;$progress.Location=New-Object Drawing.Point(18,500);$progress.Size=New-Object Drawing.Size(737,18);$form.Controls.Add($progress)
+$log=New-Object Windows.Forms.TextBox;$log.Multiline=$true;$log.ReadOnly=$true;$log.ScrollBars='Vertical';$log.Location=New-Object Drawing.Point(18,530);$log.Size=New-Object Drawing.Size(737,215);$log.Anchor='Top,Left,Right,Bottom';$form.Controls.Add($log)
 $run.Add_Click({
   $run.Enabled=$false
   try {
@@ -44,10 +47,22 @@ $run.Add_Click({
     $argsList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$merge,'-TargetPath',$fields['Target'].Text,'-SourcePath',$fields['Source'].Text,'-OutputPath',$fields['Output'].Text,'-SourceMode',$mode.SelectedItem.ToString(),'-TargetLayer',$layer.Value.ToString())
     if (-not $dup.Checked) {$argsList+=@('-DuplicateMode','Allow')}
     if ($convert.Checked) {$argsList+='-AllowUnitConversion'}
-    $output = & powershell.exe @argsList 2>&1 | Out-String
-    $log.AppendText($output+"`r`n")
+    if ($preview.Checked) {$argsList+='-AnalyzeOnly'}
+    if ($verboseBox.Checked) {$argsList+='-Verbose'}
+    $progress.Value=0
+    $script:hasWarnings=$false
+    & powershell.exe @argsList 2>&1 | ForEach-Object {
+      $line=$_.ToString()
+      $log.AppendText($line+"`r`n")
+      if ($line -match 'PROGRESS (\d+)/(\d+)') { $progress.Value=[int][Math]::Min(100,100*[double]$Matches[1]/[double]$Matches[2]) }
+      if ($line -match 'WARNING|duplicates=[1-9]|invalid=[1-9]') {$script:hasWarnings=$true}
+      [Windows.Forms.Application]::DoEvents()
+    }
     if ($LASTEXITCODE -ne 0) { throw 'Merge failed. Review the log for details.' }
-    [Windows.Forms.MessageBox]::Show('Merge complete. Open the new .dipxml in DipTrace and verify pours, layers, nets, and DRC.','Success') | Out-Null
+    $progress.Value=100
+    $message=if ($preview.Checked) {'Analysis complete. No PCB exported.'} else {'Merge complete. Verify the new board in DipTrace and run DRC.'}
+    $status=if ($script:hasWarnings) {'Completed with warnings'} else {'Success'}
+    [Windows.Forms.MessageBox]::Show($message,$status) | Out-Null
   } catch { $log.AppendText("ERROR: $($_.Exception.Message)`r`n");[Windows.Forms.MessageBox]::Show($_.Exception.Message,'Merge error') | Out-Null }
   finally { $run.Enabled=$true }
 })

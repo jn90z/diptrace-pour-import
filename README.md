@@ -56,3 +56,7 @@ The command-line script also provides `-Clearance`, `-BoardClearance`, `-LineWid
 ## Future improvements
 
 Sample real DipTrace 5.3 `.dipxml` boards with complex copper fills should be used to verify serializer compatibility, group IDs, multiple layers, source polygon types, and DipTrace open/re-save behaviour. A future release can support an optional preview and per-pour net assignment.
+
+## Conversion reporting (v0.2)
+
+Both interfaces report detected shapes by type, source pours, original destination pours, prepared/converted items, duplicates, invalid items with reasons, planned merges, actual merged/exported counts, elapsed time and verification results. A unique timestamped log is written alongside the selected output path once input/output path checks pass. The GUI streams progress and offers Analyze only and Verbose logging checkboxes. CLI equivalents: `-AnalyzeOnly` (no PCB output) and `-Verbose`. Analysis still requires a new output path for the log. Verification compares existing pour nodes and non-pour XML after whitespace normalization; it is not DipTrace DRC or schema validation. Windows/DipTrace runtime testing remains pending.

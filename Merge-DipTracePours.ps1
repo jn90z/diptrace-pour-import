@@ -14,7 +14,8 @@ param(
   [double]$MinimumArea = 0,
   [double]$SpokeWidth = 0.33,
   [int]$Priority = 0,
-  [switch]$AllowUnitConversion
+  [switch]$AllowUnitConversion,
+  [switch]$AnalyzeOnly
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -97,12 +98,26 @@ function Convert-Shape([System.Xml.XmlElement]$Shape,[System.Xml.XmlDocument]$Do
   [void]$p.AppendChild($list)
   return $p
 }
+$timer=[Diagnostics.Stopwatch]::StartNew()
+$logPath=$null
+function Report([string]$Message) {
+  $line=('{0:HH:mm:ss} {1}' -f (Get-Date),$Message)
+  if ($logPath) { Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8 }
+  Write-Host $line
+}
+try {
 $targetFull=[System.IO.Path]::GetFullPath($TargetPath)
 $sourceFull=[System.IO.Path]::GetFullPath($SourcePath)
 $outputFull=[System.IO.Path]::GetFullPath($OutputPath)
 if ($outputFull -ieq $targetFull -or $outputFull -ieq $sourceFull) { throw 'Output must be a new file and cannot overwrite either input.' }
 if (Test-Path -LiteralPath $outputFull) { throw 'Output already exists. Choose a new filename to avoid overwriting prior work.' }
+$logPath=Join-Path ([IO.Path]::GetDirectoryName($outputFull)) (([IO.Path]::GetFileName($outputFull))+'.'+(Get-Date -Format 'yyyyMMdd-HHmmss-fff')+'.'+[guid]::NewGuid().ToString('N')+'.log')
+Report "Target: $targetFull"
+Report "Source: $sourceFull"
+Report "Output: $outputFull"
+Report "Log: $logPath"
 $target=Read-DipXml $targetFull
+$baseline=$target.CloneNode($true)
 $source=Read-DipXml $sourceFull
 $targetUnit=Get-Units $target
 $sourceUnit=Get-Units $source
@@ -116,10 +131,17 @@ foreach ($p in @($targetPours.SelectNodes('./CopperPour'))) { [void]$existing.Ad
 $sourcePours=@($source.SelectNodes('/Source/Board/CopperPours/CopperPour'))
 $sourceShapes=@($source.SelectNodes('/Source/Board/Shapes/Shape'))
 if ($SourceMode -eq 'Auto') { if ($sourcePours.Count -gt 0) { $SourceMode='Pours' } else { $SourceMode='Shapes' } }
-$items=if ($SourceMode -eq 'Pours') { $sourcePours } else { $sourceShapes }
+$items=@(if ($SourceMode -eq 'Pours') { $sourcePours } else { $sourceShapes })
+Report "Source mode: $SourceMode; source units: $sourceUnit; target units: $targetUnit; scale: $factor"
+Report "Shapes detected: $($sourceShapes.Count); source pours detected: $($sourcePours.Count); existing destination pours: $nextId"
+foreach ($group in @($sourceShapes | Group-Object -Property { $_.GetAttribute('Type') })) { Report "Shape type $($group.Name): $($group.Count)" }
+$initialCount=$nextId
 if ($items.Count -eq 0) { throw "No $SourceMode found in source XML." }
-$added=0;$skipped=0;$invalid=0
+$added=0;$skipped=0;$invalid=0;$processed=0;$converted=0
 foreach ($item in $items) {
+  $processed++
+  if ($processed -eq 1 -or $processed % 25 -eq 0 -or $processed -eq $items.Count) { Report "PROGRESS $processed/$($items.Count)" }
+  try {
   if ($SourceMode -eq 'Pours') {
     $new=[System.Xml.XmlElement]$target.ImportNode($item,$true)
     $new.RemoveAttribute('Poured');$new.RemoveAttribute('Selected');$new.RemoveAttribute('Group');$new.RemoveAttribute('ShieldGroup');$new.RemoveAttribute('TraceShieldGroup')
@@ -127,12 +149,12 @@ foreach ($item in $items) {
     foreach ($n in @($new.SelectNodes('./Lines|./Polygons|./SpokeLine|./Regions'))) { [void]$new.RemoveChild($n) }
   } else {
     try {
-      if ($item.GetAttribute('Layer') -notin @('Signal/Plane','3')) { $invalid++;continue }
+      if ($item.GetAttribute('Layer') -notin @('Signal/Plane','3')) { throw 'Not a signal-plane shape' }
       $new=Convert-Shape $item $target $TargetLayer
-    } catch { Write-Warning "Shape skipped: $($_.Exception.Message)";$invalid++;continue }
+    } catch { throw }
   }
   $pts=@($new.SelectNodes('./Points/Point'))
-  if ($pts.Count -lt 3) { $invalid++; continue }
+  if ($pts.Count -lt 3) { throw 'Fewer than three vertices' }
   foreach ($pt in $pts) {
     if ($factor -ne 1) {
       foreach ($axis in @('X','Y')) {
@@ -143,11 +165,16 @@ foreach ($item in $items) {
   }
   $new.SetAttribute('Id',[string]$nextId)
   $signature=Get-PolygonSignature $new
-  if ($DuplicateMode -eq 'Skip' -and $existing.Contains($signature)) { $skipped++;continue }
+  $converted++
+  if ($VerbosePreference -eq 'Continue') { Report "Item $processed prepared: $($pts.Count) vertices" }
+  if ($DuplicateMode -eq 'Skip' -and $existing.Contains($signature)) { $skipped++;Report "Item $processed skipped: duplicate outline";continue }
   [void]$existing.Add($signature)
   [void]$targetPours.AppendChild($new)
   $nextId++;$added++
+  } catch { $invalid++;Report "WARNING item ${processed}: $($_.Exception.Message)" }
 }
+Report "SUMMARY detected=$($items.Count); prepared=$converted; shapesConverted=$(if ($SourceMode -eq 'Shapes') {$converted} else {0}); duplicates=$skipped; invalid=$invalid; plannedMerge=$added; existing=$initialCount; plannedTotal=$nextId"
+if ($AnalyzeOnly) { Report "ANALYSIS COMPLETE: no PCB exported; elapsed=$($timer.Elapsed.TotalSeconds) seconds"; return }
 if ($added -eq 0) { throw "Nothing to merge (duplicates=$skipped; unsupported=$invalid). No output created." }
 $folder=[System.IO.Path]::GetDirectoryName($outputFull)
 if (-not (Test-Path -LiteralPath $folder)) { throw "Output folder does not exist: $folder" }
@@ -160,4 +187,29 @@ try { $target.Save($writer) } finally { $writer.Dispose() }
 $check=Read-DipXml $outputFull
 $finalCount=@($check.SelectNodes('/Source/Board/CopperPours/CopperPour')).Count
 if ($finalCount -ne $nextId) { Remove-Item -LiteralPath $outputFull -Force;throw 'Verification failed: output pour count mismatch.' }
-Write-Output "SUCCESS: Added=$added; DuplicatesSkipped=$skipped; UnsupportedSkipped=$invalid; TotalPours=$finalCount; Output=$outputFull"
+# Compare non-pour XML and existing pour nodes after normalizing formatting.
+function Canonical([System.Xml.XmlNode]$Node) {
+  $copy=New-Object System.Xml.XmlDocument
+  $copy.PreserveWhitespace=$false
+  $copy.LoadXml($Node.OuterXml)
+  return $copy.DocumentElement.OuterXml
+}
+try {
+  $oldPours=@($baseline.SelectNodes('/Source/Board/CopperPours/CopperPour'))
+  $newPours=@($check.SelectNodes('/Source/Board/CopperPours/CopperPour'))
+  for($i=0;$i -lt $oldPours.Count;$i++) {
+    if ((Canonical $oldPours[$i]) -cne (Canonical $newPours[$i])) { throw "Existing pour $i changed" }
+  }
+  foreach ($doc in @($baseline,$check)) {
+    $node=$doc.SelectSingleNode('/Source/Board/CopperPours')
+    if ($node) { [void]$node.ParentNode.RemoveChild($node) }
+  }
+  if ((Canonical $baseline.DocumentElement) -cne (Canonical $check.DocumentElement)) { throw 'Non-pour XML changed' }
+} catch { Remove-Item -LiteralPath $outputFull -Force;throw }
+Report "Verification passed: XML readable, existing pours and non-pour XML retained"
+$status=if ($invalid -gt 0 -or $skipped -gt 0) {'SUCCESS WITH WARNINGS'} else {'SUCCESS'}
+Report "$status : Merged=$added; ExportedTotal=$finalCount; Elapsed=$($timer.Elapsed.TotalSeconds) seconds; Output=$outputFull"
+} catch {
+  Report "FAILED: $($_.Exception.Message); elapsed=$($timer.Elapsed.TotalSeconds) seconds"
+  throw
+}
